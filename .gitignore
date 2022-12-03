@@ -1,0 +1,4 @@
+*.o
+nyufile
+nyufile-autograder/
+*.tar.xz

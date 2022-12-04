@@ -1,6 +1,6 @@
 C=gcc
 CFLAGS=-g -pedantic -std=gnu17 -Wall -Wextra
-LDFLAGS=-pthread
+LDFLAGS=-pthread -l crypto
 
 .PHONY: all
 all: nyufile
@@ -12,4 +12,3 @@ nyufile.o: nyufile.c fsinfo.h
 .PHONY: clean
 clean:
 	rm -f *.o nyufile
-

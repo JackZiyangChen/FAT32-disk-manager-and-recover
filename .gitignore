@@ -2,3 +2,4 @@
 nyufile
 nyufile-autograder/
 *.tar.xz
+.vscode/

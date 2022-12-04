@@ -9,20 +9,28 @@
 #include <fcntl.h>
 #include <getopt.h>
 #include <pthread.h>
+#include <openssl/sha.h>
+#define SHA_DIGEST_LENGTH 20
 
 #include "fsinfo.h"
 
 
+unsigned char *SHA1(const unsigned char *d, size_t n, unsigned char *md);
+
 void print_file_system_info(char* diskMap);
 void printDefault();
 void print_root_directory(char* diskMap);
-void recover_file(char* diskMap, char* filename);
+void recover_file(char* diskMap, char* filename, char* shaSignature);
 void reset_fat_table(char* diskMap, struct DirEntry* fileEntry);
+void undelete_file(char* diskMap, struct DirEntry** fileInfoRef, char* filename);
 
 int root_dir_offset(char* diskMap);
 int fat_offset(char* diskMap);
 int bytes_per_cluster(char* diskMap);
 int compare_file_name(unsigned char* one, char* two, int offset);
+char* get_contiguous_deleted_hash(char* diskMap, struct DirEntry* fileEntry);
+int compare_hash(char* hash1, char* hash2);
+char* input_to_hash(char* input);
 
 
 int main(int argc, char *argv[])
@@ -42,7 +50,7 @@ int main(int argc, char *argv[])
 
     // switch on input based on flag
     opterr = 0;
-    int options = getopt(argc, argv, "r:R:il");
+    int options = getopt(argc, argv, "r:R:ils:");
     switch(options)
     {
         case 'i':
@@ -51,17 +59,46 @@ int main(int argc, char *argv[])
         case 'l':
             print_root_directory(diskMap);
             break;
-        case 'r':
-            if(argc!=4){
+        case 's': ;
+            char* hash = (char*)malloc(sizeof(char)*41);
+            options = getopt(argc, argv, "r:R:");
+            if(options == 'r'){
+                recover_file(optarg, diskMap, hash);
+            }
+            else if(options == 'R'){
+                // TODO: to be implemented
+            }
+            else{
                 printDefault();
+            }
+            break;
+        case 'r':
+            if(argc==4){
+                recover_file(argv[3], diskMap, NULL);
+                break;
+            }else if(argc==6){
+                char* filename = malloc(sizeof(char)*13);
+                strcpy(filename, optarg);
+                options = getopt(argc, argv, "s:");
+                if(options=='s'){
+                    // printf("here!");
+                    // printf("%s\n", filename);
+                    recover_file(filename, diskMap, optarg);
+                }else{
+                    printDefault();
+                }
                 break;
             }else{
-                recover_file(argv[3], diskMap);
+                printDefault();
                 break;
             }
             break;
         case 'R':
             printf("R\n");
+            break;
+
+        case -1:
+            printDefault();
             break;
         default:
             printDefault();
@@ -88,7 +125,7 @@ void printDefault(){
 }
 
 // milestone 4
-void recover_file(char* filename, char* diskMap){
+void recover_file(char* filename, char* diskMap, char* shaSignature){
     struct BootEntry* fs = (struct BootEntry*)diskMap;
 
     // find the file in the root directory
@@ -100,14 +137,28 @@ void recover_file(char* filename, char* diskMap){
     int rootCluster = fs->BPB_RootClus;
 
     int found = 0;
-    while(rootCluster < 0x0FFFFFF8){
+    while(rootCluster < 0x0FFFFFF7){
         for(int i = 0; i < bytes_per_cluster(diskMap); i+=sizeof(struct DirEntry)){
             // printf("%c\n", fileEntry->DIR_Name[8]);
             if(fileEntry->DIR_Name[0] == 0xE5 && compare_file_name(fileEntry->DIR_Name, filename, 1) == 1){
                 // found the file
-                found += 1;
-                target = *(&fileEntry);
-                
+                if(shaSignature == NULL){
+                    // no sha signature
+                    // printf("filename: %s\n", filename);
+                    target = *(&fileEntry);
+                    found += 1;
+                }else{
+                    // check the hash
+                    char* hash = get_contiguous_deleted_hash(diskMap, fileEntry);
+                    char* inputHash = input_to_hash(shaSignature);
+                    
+
+                    if(compare_hash(hash, inputHash) == 1){
+                        // printf("found\n");
+                        target = *(&fileEntry);
+                        found += 1;
+                    }
+                }
             }
             fileEntry++;
         }
@@ -119,17 +170,22 @@ void recover_file(char* filename, char* diskMap){
     if(found==0){
         printf("%s: file not found\n", filename);
     }else if(found==1){
-        // reset file name
-        ((*(&target))->DIR_Name)[0] = filename[0];
-        // reset fat table
-        reset_fat_table(diskMap, target);
-        printf("%s: successfully recovered\n", filename);
+        undelete_file(diskMap, &target, filename);
+        if(shaSignature != NULL){
+            printf("%s: successfully recovered with SHA-1\n", filename);
+        }else{
+            printf("%s: successfully recovered\n", filename);
+        }
     }else{
         printf("%s: multiple candidates found\n", filename);
     }
 
 }
 
+void undelete_file(char* diskMap, struct DirEntry** fileInfoRef, char* filename){
+    (*fileInfoRef)->DIR_Name[0] = filename[0];
+    reset_fat_table(diskMap, *fileInfoRef);
+}
 
 // milestone 5
 void reset_fat_table(char* diskMap, struct DirEntry* fileEntry){
@@ -261,8 +317,18 @@ int compare_file_name(unsigned char* one, char* two, int offset){
     char* name = strtok(temp, ".");
     char* ext = strtok(NULL, ".");
 
-    for(int i=offset; i<(int)strlen(name); i++){
+    int i = offset;
+    if(strlen(name) > 8){
+        return 0;
+    }
+    while(i<(int)strlen(name)){
         if(one[i] != name[i]){
+            return 0;
+        }
+        i++;
+    }
+    if(i<8){
+        if(one[i] != ' '){
             return 0;
         }
     }
@@ -280,6 +346,48 @@ int compare_file_name(unsigned char* one, char* two, int offset){
     return 1;
 }
 
+char* get_contiguous_deleted_hash(char* diskMap, struct DirEntry* fileEntry){
+    int BYTEPERCLUSTER = bytes_per_cluster(diskMap);
+    int rootDirByteOffset = root_dir_offset(diskMap);
+
+    int cluster = fileEntry->DIR_FstClusHI << 16 | fileEntry->DIR_FstClusLO;
+    int offset = rootDirByteOffset + (cluster-2) * BYTEPERCLUSTER;
+    unsigned char* ptr = (unsigned char*)(diskMap + offset);
+
+    int fileSize = fileEntry->DIR_FileSize;
+    unsigned char* res = malloc(sizeof(char)*20);
+    
+    SHA1(ptr, (size_t)(fileSize*sizeof(char)), res);
+    return (char*)res;
+}
+
+int compare_hash(char* one, char* two){
+    for(int i=0; i<20; i++){
+        if(one[i] != two[i]){
+            return 0;
+        }
+    }
+    return 1;
+}
+
+char char_to_hex(char c){
+    if(c >= '0' && c <= '9'){
+        return c - '0';
+    }else{
+        return c+10 - 'a';
+    }
+}
+
+char* input_to_hash(char* input){
+    char* res = malloc(sizeof(char)*20);
+    for(int i=0; i<20; i++){
+        res[i] = (char_to_hex(input[i*2]) << 4) | char_to_hex(input[i*2+1]);
+    }
+    return res;
+}
+
+
+
 /* sourced used
 * https://www.cnwrecovery.com/manual/FAT32DeletedFileRecovery.html - 0xE5 deleted file
 * opt parser code was partly inspired by other students discussion in discord
@@ -287,4 +395,5 @@ int compare_file_name(unsigned char* one, char* two, int offset){
 * https://stackoverflow.com/questions/50312194/how-to-print-a-char-array-in-c-through-printf - print char array
 * https://www.educative.io/answers/splitting-a-string-using-strtok-in-c - split string
 * https://stackoverflow.com/questions/62048626/how-to-change-value-at-address-from-mmap-without-malloc - modify mmap to allow write
+* https://stackoverflow.com/questions/18496282/why-do-i-get-a-label-can-only-be-part-of-a-statement-and-a-declaration-is-not-a - label as statement
 */

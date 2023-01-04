@@ -3,3 +3,5 @@ nyufile
 nyufile-autograder/
 *.tar.xz
 .vscode/
+*.disk
+*.dmg

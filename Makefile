@@ -7,7 +7,7 @@ all: nyufile
 
 nyufile: nyufile.o
 
-nyufile.o: nyufile.c fsinfo.h
+nyufile.o: nyufile.c fsinfo.h linkedlist.h
 
 .PHONY: clean
 clean:
